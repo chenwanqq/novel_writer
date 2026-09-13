@@ -206,7 +206,8 @@ class Repository:
                 overlaps = max(af if af is not None else -float("inf"), bf if bf is not None else -float("inf")) < min(at if at is not None else float("inf"), bt if bt is not None else float("inf"))
                 if overlaps and a["data"].get("value") != b["data"].get("value"):
                     issues.append({"record": a["id"], "other": b["id"], "code": "attribute_conflict"})
-        return issues
+        from .atlas import validate_atlas
+        return issues + validate_atlas(state, self)
 
     def preview(self, proposal: str) -> dict:
         with self.connect() as db:
