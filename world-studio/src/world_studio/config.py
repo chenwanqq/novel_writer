@@ -5,7 +5,10 @@ from pathlib import Path
 
 def data_path(value: str | Path | None = None) -> Path:
     configured = value or os.environ.get("WORLD_STUDIO_DATA")
-    return Path(configured).expanduser().resolve() if configured else Path.home() / ".local/share/world-studio"
+    path = Path(configured).expanduser().resolve() if configured else Path.home() / ".local/share/world-studio"
+    if path.is_relative_to(Path(__file__).resolve().parents[2]):
+        raise ValueError("Data must be outside the installed plugin directory")
+    return path
 
 
 def contained(root: Path, relative: str) -> Path:

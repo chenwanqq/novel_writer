@@ -13,3 +13,6 @@ dist/
 *.sqlite*
 .coverage
 .DS_Store
+runtime-*.json
+runtime-*.log
+.playwright-mcp/

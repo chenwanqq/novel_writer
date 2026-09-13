@@ -1,0 +1,20 @@
+{
+  "name": "world-studio",
+  "version": "0.1.0",
+  "description": "构建有版本和来源的虚拟世界，在地图上规划空间，再创作独立作品。",
+  "author": {
+    "name": "chenwanqq"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "World Studio",
+    "shortDescription": "世界设定、地图与小说写作",
+    "longDescription": "本地世界资料库：导入与持续讨论、版本化地图、作品规划、正文连续性和风格范例。",
+    "developerName": "chenwanqq",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": ["导入已有设定，建立一个可追溯的世界。", "打开世界地图，规划地点与路线。", "从这个世界选择一个人物，开始构思作品。"],
+    "brandColor": "#176B60"
+  },
+  "mcpServers": "./.mcp.json"
+}

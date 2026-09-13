@@ -1,0 +1,12 @@
+<evaluation>
+  <qa_pair><question>Read the northern world's adopted seat fact and the original source decision. How many seats were ultimately adopted?</question><answer>12</answer></qa_pair>
+  <qa_pair><question>Inspect seats_candidate and compare its status with seats. Is the twenty-four-seat alternative public canon?</question><answer>rejected</answer></qa_pair>
+  <qa_pair><question>Find a confirmed courier route from capital to port through gate. What is its minimum travel duration in days?</question><answer>5</answer></qa_pair>
+  <qa_pair><question>For that same capital-to-port route, add the maximum durations of both segments. What is the maximum for this path?</question><answer>9</answer></qa_pair>
+  <qa_pair><question>Read port and follow its child-map reference. What is the subordinate map ID?</question><answer>port_city</answer></qa_pair>
+  <qa_pair><question>Compare ledger and sister works' creation snapshots. Which world do both inherit?</question><answer>northern</answer></qa_pair>
+  <qa_pair><question>Read ledger scene1's adopted draft and its continuity evidence. What is the recorded event ID?</question><answer>asked_key</answer></qa_pair>
+  <qa_pair><question>Compile scene2 context and distinguish adopted events from scene goals. Which continuity record is available before scene2?</question><answer>asked_key</answer></qa_pair>
+  <qa_pair><question>Inspect the saved editorial before/after pair. Did saving this example automatically adopt a new scene1 draft?</question><answer>no</answer></qa_pair>
+  <qa_pair><question>Inspect the imported source's unit progress and associated proposal. How many source units were fully reviewed?</question><answer>1</answer></qa_pair>
+</evaluation>

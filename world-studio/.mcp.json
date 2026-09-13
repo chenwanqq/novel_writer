@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "world-studio": {
+      "command": "uv",
+      "args": ["run", "--frozen", "world-studio", "mcp"],
+      "cwd": "."
+    }
+  }
+}
