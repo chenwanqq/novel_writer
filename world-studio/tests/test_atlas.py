@@ -5,7 +5,7 @@ import pytest
 from PIL import Image
 from starlette.testclient import TestClient
 
-from world_studio.atlas import Atlas, route_query
+from world_studio.atlas import Atlas, export_svg, route_query
 from world_studio.http import create_app
 from world_studio.repository import Repository, StudioError
 from test_repository import put
@@ -75,3 +75,63 @@ def test_http_auth_and_shared_state(tmp_path):
     assert client.post("/api/worlds", json={}, headers=headers).json()["result"][0]["id"] == "w"
     headers["Origin"] = "https://attacker.example"
     assert client.post("/api/worlds", json={}, headers=headers).status_code == 403
+
+
+def test_map_commit_rolls_back_world_and_draft_together(tmp_path, monkeypatch):
+    repo = setup_map(tmp_path)
+    atlas = Atlas(repo)
+    draft = atlas.new_draft("w")
+    original_head = repo.head("w")
+    draft["state"]["a"]["data"]["x"] = 42
+    draft = atlas.save(draft["id"], 0, draft["state"])
+    original_commit = repo.commit_in_transaction
+
+    def fail_after_world_write(db, proposal, decision):
+        original_commit(db, proposal, decision)
+        raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(repo, "commit_in_transaction", fail_after_world_write)
+    with pytest.raises(RuntimeError):
+        atlas.commit(draft["id"], draft["version"], "采用")
+    assert repo.head("w") == original_head
+    assert atlas.draft(draft["id"])["committed"] is None
+    monkeypatch.setattr(repo, "commit_in_transaction", original_commit)
+    result = atlas.commit(draft["id"], draft["version"], "采用")
+    assert atlas.commit(draft["id"], draft["version"], "采用") == result
+
+
+def test_closed_routes_and_same_object_rebase_conflict(tmp_path):
+    repo = setup_map(tmp_path)
+    atlas = Atlas(repo)
+    draft = atlas.new_draft("w")
+    draft["state"]["a"]["data"]["x"] = 10
+    draft = atlas.save(draft["id"], 0, draft["state"])
+    place, road = repo.snapshot("w")["a"], repo.snapshot("w")["road"]
+    place["data"]["x"] = 20
+    road["data"]["availability"] = "closed"
+    changes = [{"action": "put", "id": v["id"], "record": v} for v in (place, road)]
+    proposal = repo.propose("w", "main", repo.head("w"), changes, "remote")
+    repo.commit(proposal["change_set"], "关闭道路并移动地点")
+    assert route_query(repo, "w", "a", "b")["status"] == "unreachable"
+    with pytest.raises(StudioError) as error:
+        atlas.rebase(draft["id"], draft["version"])
+    assert error.value.code == "merge_conflict"
+    assert atlas.draft(draft["id"])["state"]["a"]["data"]["x"] == 10
+
+
+def test_svg_export_pins_revision_and_embeds_background(tmp_path):
+    from pathlib import Path
+    import xml.etree.ElementTree as ET
+    repo = setup_map(tmp_path)
+    old = repo.head("w")
+    image = io.BytesIO()
+    Image.new("RGB", (20, 10)).save(image, "PNG")
+    asset = Atlas(repo).upload(base64.b64encode(image.getvalue()).decode())
+    map_record = repo.snapshot("w")["map"]
+    map_record["data"]["asset"] = asset["asset"]
+    p = repo.propose("w", "main", old, [{"action": "put", "id": "map", "record": map_record}], "bg")
+    repo.commit(p["change_set"], "采用底图")
+    text = Path(export_svg(repo, "w", "map")["path"]).read_text()
+    ET.fromstring(text)
+    assert "data:image/png;base64," in text
+    assert "data:image" not in Path(export_svg(repo, "w", "map", old)["path"]).read_text()

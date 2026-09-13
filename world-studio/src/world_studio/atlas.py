@@ -3,6 +3,8 @@ import base64
 import heapq
 import io
 import json
+import math
+from xml.sax.saxutils import escape
 from typing import Literal
 
 from PIL import Image
@@ -55,6 +57,13 @@ class RegionData(Model):
     points: list[tuple[float, float]] = Field(min_length=3)
     color: str = Field(default="#bdd8ca", pattern=r"^#[a-fA-F0-9]{6}$")
     entity: str | None = None
+
+
+def normalize_spatial(record: dict) -> dict:
+    model = {"map": MapData, "place": PlaceData, "route": RouteData, "region": RegionData}.get(record["kind"])
+    if model:
+        record["data"] = model.model_validate(record["data"]).model_dump(mode="json", by_alias=True)
+    return record
 
 
 def validate_atlas(state: dict, repo: Repository) -> list[dict]:
@@ -137,7 +146,7 @@ class Atlas:
             return value
 
     def save(self, ident: str, version: int, state: dict) -> dict:
-        normalized = {k: Record.model_validate(v).model_dump(mode="json") for k, v in state.items()}
+        normalized = {k: normalize_spatial(Record.model_validate(v).model_dump(mode="json")) for k, v in state.items()}
         if any(k != v["id"] for k, v in normalized.items()):
             raise StudioError("record_id", "Record key and ID must match")
         with self.repo.transaction() as db:
@@ -171,22 +180,14 @@ class Atlas:
         return self.repo.propose(draft["world"], draft["branch"], draft["base"], changes, f"map:{ident}:{version}")
 
     def commit(self, ident: str, version: int, decision: str) -> dict:
-        # Freeze the draft against concurrent saves while the shared commit transaction runs.
+        proposal = self.proposal(ident, version)
         with self.repo.transaction() as db:
             row = db.execute("SELECT version,committed FROM map_drafts WHERE id=?", (ident,)).fetchone()
             if not row or row[0] != version:
                 raise StudioError("stale_draft", "Draft changed; inspect it before committing")
-            if row[1] and row[1] != "pending":
+            if row[1]:
                 return json.loads(row[1])
-            db.execute("UPDATE map_drafts SET committed='pending' WHERE id=?", (ident,))
-        try:
-            proposal = self.proposal(ident, version)
-            result = self.repo.commit(proposal["change_set"], decision)
-        except BaseException:
-            with self.repo.transaction() as db:
-                db.execute("UPDATE map_drafts SET committed=NULL WHERE id=? AND committed='pending'", (ident,))
-            raise
-        with self.repo.transaction() as db:
+            result = self.repo.commit_in_transaction(db, proposal["change_set"], decision)
             db.execute("UPDATE map_drafts SET committed=? WHERE id=?", (encode(result), ident))
         return result
 
@@ -221,6 +222,8 @@ class Atlas:
 
 def route_query(repo: Repository, world: str, start: str, end: str, revision: str | None = None,
                 conditions: list[str] | None = None, mode: str | None = None, available_days: float | None = None) -> dict:
+    if available_days is not None and (not math.isfinite(available_days) or available_days < 0):
+        raise StudioError("travel_time", "Available days must be a finite non-negative number")
     state = repo.snapshot(world, revision)
     if any(state.get(p, {}).get("kind") != "place" for p in (start, end)):
         raise StudioError("place_missing", "Select existing start and destination places")
@@ -249,6 +252,9 @@ def route_query(repo: Repository, world: str, start: str, end: str, revision: st
         best[place] = minimum
         if place == end:
             timing = None if available_days is None else ("impossible" if available_days < minimum else "possible" if available_days >= maximum else "uncertain")
+            # Unknown alternatives cannot justify a global claim that arrival is impossible.
+            if timing == "impossible" and unknown:
+                timing = "uncertain"
             return {"status": "reachable", "routes": path, "min_days": minimum, "max_days": maximum,
                     "timing": timing, "basis": "fastest known minimum-time route; maximum is for this same path",
                     "unverified_routes": sorted(unknown)}
@@ -263,3 +269,47 @@ def route_query(repo: Repository, world: str, start: str, end: str, revision: st
             stack.extend(possible.get(place, []))
     return {"status": "insufficient_information" if end in seen else "unreachable", "routes": [],
             "unverified_routes": sorted(unknown)}
+
+
+def export_svg(repo: Repository, world: str, map_id: str, revision: str | None = None) -> dict:
+    """Export a formal version without opening a browser; editor also exports draft PNGs."""
+    revision = revision or repo.head(world)
+    state = repo.snapshot(world, revision)
+    item = state.get(map_id)
+    if not item or item["kind"] != "map":
+        raise StudioError("map_missing", "Select an existing map ID")
+    data = MapData.model_validate(item["data"])
+    objects = [r for r in state.values() if r["status"] == "accepted" and r["data"].get("map") == map_id]
+    positions = []
+    for r in objects:
+        if r["kind"] == "place":
+            positions.extend([(r["data"]["x"], r["data"]["y"]), (r["data"]["x"] + 20 * len(r["name"]) + 30, r["data"]["y"])])
+        else:
+            positions.extend(r["data"].get("points", []))
+    x, y = min([0] + [p[0] for p in positions]) - 40, min([0] + [p[1] for p in positions]) - 40
+    w, h = max([data.width] + [p[0] for p in positions]) - x + 40, max([data.height] + [p[1] for p in positions]) - y + 70
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="{x} {y} {w} {h}" font-family="sans-serif">',
+             f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#edf2f5"/>',
+             '<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="none" stroke="#62969d"/></marker></defs>']
+    if data.asset:
+        url = Atlas(repo).background(data.asset)["url"]
+        parts.append(f'<image href="{url}" width="{data.width}" height="{data.height}"/>')
+    for r in sorted(objects, key=lambda r: {"region": 0, "route": 1, "place": 2}.get(r["kind"], 3)):
+        d = normalize_spatial(dict(r))["data"]
+        if r["kind"] == "region":
+            points = " ".join(f"{a},{b}" for a, b in d["points"])
+            parts.append(f'<polygon points="{points}" fill="{d["color"]}" fill-opacity=".6" stroke="#769c8c"/>')
+        elif r["kind"] == "route":
+            a, b = state[d["from"]]["data"], state[d["to"]]["data"]
+            points = " ".join(f"{p[0]},{p[1]}" for p in [(a["x"], a["y"]), *d.get("points", []), (b["x"], b["y"])])
+            marker = '' if d.get("bidirectional", True) else ' marker-end="url(#arrow)"'
+            dash = '' if d.get("availability", "open") == "open" else ' stroke-dasharray="8 5"'
+            parts.append(f'<polyline points="{points}" fill="none" stroke="#62969d" stroke-width="3"{marker}{dash}/>')
+        elif r["kind"] == "place":
+            parts.append(f'<circle cx="{d["x"]}" cy="{d["y"]}" r="10" fill="#176b70" stroke="white" stroke-width="3"/>')
+            parts.append(f'<text x="{d["x"] + 20}" y="{d["y"] + 6}" font-size="20" fill="#193943">{escape(r["name"])}</text>')
+    parts.append(f'<text x="{x + 20}" y="{y + h - 20}" font-size="16">{escape(item["name"])} · {revision}</text></svg>')
+    target = repo.root / "exports" / f"{map_id}-{revision}.svg"
+    target.parent.mkdir(exist_ok=True)
+    target.write_text("\n".join(parts), encoding="utf-8")
+    return {"path": str(target), "revision": revision, "map": map_id}

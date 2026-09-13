@@ -43,3 +43,26 @@ def test_conflicts_references_and_idempotency(tmp_path):
     r.commit(p["change_set"], "采用十二席，二十四席待定")
     p = r.propose("w", "main", r.head("w"), [{"action": "delete", "id": "council"}], "delete")
     assert r.preview(p["change_set"])["issues"]
+
+
+def test_disjoint_fact_intervals_and_parallel_writers(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    r = Repository(tmp_path)
+    base = r.create_world("w", "世界")["revision"]
+    a = put("early", kind="fact", valid_from=1, valid_to=10,
+            data={"subject": "council", "attribute": "seats", "value": 12})
+    b = put("late", kind="fact", valid_from=10,
+            data={"subject": "council", "attribute": "seats", "value": 24})
+    first = r.propose("w", "main", base, [put(), a, b], "time")
+    second = r.propose("w", "main", base, [put("other")], "parallel")
+
+    def commit(proposal):
+        try:
+            return Repository(tmp_path).commit(proposal["change_set"], "采用")["revision"]
+        except StudioError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(commit, [first, second]))
+    assert results.count("stale_base") == 1
+    assert len(r.snapshot("w")) in (1, 3)

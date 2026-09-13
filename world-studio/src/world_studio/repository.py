@@ -26,6 +26,14 @@ class StudioError(ValueError):
         self.code, self.details = code, details
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 class Repository:
     def __init__(self, root: str | Path | None = None):
         self.root = data_path(root)
@@ -57,7 +65,7 @@ class Repository:
                 raise StudioError("schema_version", "Unsupported database version; use a compatible release")
 
     def connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.root / "world.sqlite", timeout=15)
+        db = sqlite3.connect(self.root / "world.sqlite", timeout=15, factory=ClosingConnection)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         return db
@@ -156,7 +164,11 @@ class Repository:
         return {"branch": name, "revision": revision}
 
     def propose(self, world: str, branch: str, base: str, changes: list[dict], key: str) -> dict:
+        from .atlas import normalize_spatial
         normalized = [Change.model_validate(c).model_dump(mode="json") for c in changes]
+        for change in normalized:
+            if change["record"] is not None:
+                normalize_spatial(change["record"])
         if len({c["id"] for c in normalized}) != len(normalized):
             raise StudioError("duplicate_change", "Each record can be changed only once per proposal")
         with self.transaction() as db:
@@ -216,24 +228,28 @@ class Repository:
                     "changes": json.loads(row["changes"]), "issues": self.validate(state, row["world"], db)}
 
     def commit(self, proposal: str, decision: str) -> dict:
+        with self.transaction() as db:
+            return self.commit_in_transaction(db, proposal, decision)
+
+    def commit_in_transaction(self, db, proposal: str, decision: str) -> dict:
+        """Allow atlas state and world head to advance in the same caller-owned transaction."""
         if not decision.strip():
             raise StudioError("decision_required", "Record the author's explicit adoption decision")
-        with self.transaction() as db:
-            row, state = self._preview(db, proposal)
-            if row["result"]:
-                return json.loads(row["result"])
-            if self.head(row["world"], row["branch"], db) != row["base"]:
-                raise StudioError("stale_base", "World changed; compare revisions and create a new proposal", self.preview(proposal))
-            issues = self.validate(state, row["world"], db)
-            if issues:
-                raise StudioError("validation", "Resolve change-set issues before committing", issues)
-            rev = uid("r")
-            db.execute("INSERT INTO revisions(id,world,parent,snapshot,decision) VALUES(?,?,?,?,?)",
-                       (rev, row["world"], row["base"], encode(state), decision))
-            db.execute("UPDATE branches SET head=? WHERE world=? AND name=?", (rev, row["world"], row["branch"]))
-            result = {"revision": rev, "world": row["world"], "branch": row["branch"], "change_set": proposal}
-            db.execute("UPDATE proposals SET decision=?,result=? WHERE id=?", (decision, encode(result), proposal))
-            return result
+        row, state = self._preview(db, proposal)
+        if row["result"]:
+            return json.loads(row["result"])
+        if self.head(row["world"], row["branch"], db) != row["base"]:
+            raise StudioError("stale_base", "World changed; compare revisions and create a new proposal", self.preview(proposal))
+        issues = self.validate(state, row["world"], db)
+        if issues:
+            raise StudioError("validation", "Resolve change-set issues before committing", issues)
+        rev = uid("r")
+        db.execute("INSERT INTO revisions(id,world,parent,snapshot,decision) VALUES(?,?,?,?,?)",
+                   (rev, row["world"], row["base"], encode(state), decision))
+        db.execute("UPDATE branches SET head=? WHERE world=? AND name=?", (rev, row["world"], row["branch"]))
+        result = {"revision": rev, "world": row["world"], "branch": row["branch"], "change_set": proposal}
+        db.execute("UPDATE proposals SET decision=?,result=? WHERE id=?", (decision, encode(result), proposal))
+        return result
 
     def diff(self, world: str, before: str, after: str) -> list[dict]:
         a, b = self.snapshot(world, before), self.snapshot(world, after)
